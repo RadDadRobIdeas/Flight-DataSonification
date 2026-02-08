@@ -1,2 +1,2 @@
 # Flight-DataSonification
-sonification of live flight data 
+sonification of live and replayed flight data. 
