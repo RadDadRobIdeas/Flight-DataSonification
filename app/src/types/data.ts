@@ -19,6 +19,7 @@ export interface DataPacket {
   timestamp: number;
   continuous: Record<string, ContinuousValue>;
   events: DataEvent[];
+  metadata?: Record<string, unknown>;
 }
 
 export type DataSourceStatus = 'disconnected' | 'connecting' | 'connected' | 'error';

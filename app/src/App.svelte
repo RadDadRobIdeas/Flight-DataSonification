@@ -12,10 +12,14 @@
     airportInput,
     airportRadius,
     typeInput,
+    trackingLabel,
+    hasRecordedData,
+    dataFeed,
   } from './stores';
   import FlightConfig from './ui/FlightConfig.svelte';
   import VoiceMonitor from './ui/VoiceMonitor.svelte';
   import MasterControls from './ui/MasterControls.svelte';
+  import DataFeed from './ui/DataFeed.svelte';
 
   let orchestrator = $state<Orchestrator | null>(null);
   let adapter = $state<AdsbAdapter | null>(null);
@@ -24,6 +28,9 @@
   let statusMessage = $state('Ready');
   let selectedPreset = $state('drone');
   let updateTimer: ReturnType<typeof setInterval> | null = null;
+
+  // Persisted data recorder reference (survives stop for downloads)
+  let lastDataRecorder = $state<import('./data/DataRecorder').DataRecorder | null>(null);
 
   isRunning.subscribe((v) => { running = v; });
   isRecording.subscribe((v) => { recording = v; });
@@ -46,10 +53,67 @@
     KSFO: { lat: 37.6213, lon: -122.3790 },
   };
 
+  /** Read current store value synchronously */
+  function getStore<T>(store: { subscribe: (cb: (v: T) => void) => () => void }): T {
+    let val: T;
+    const unsub = store.subscribe((v) => { val = v; });
+    unsub();
+    return val!;
+  }
+
+  function buildAdapter(): { adapter: AdsbAdapter; label: string } {
+    const mode = getStore(trackingMode);
+    const callsign = getStore(callsignInput);
+    const airport = getStore(airportInput);
+    const radius = getStore(airportRadius);
+    const acType = getStore(typeInput);
+
+    if (mode === 'callsign' && callsign) {
+      const callsigns = callsign.split(',').map((s) => s.trim()).filter(Boolean);
+      return {
+        adapter: new AdsbAdapter({ callsigns }),
+        label: `Tracking: ${callsigns.join(', ')}`,
+      };
+    }
+
+    if (mode === 'airport' && airport) {
+      const coords = AIRPORT_COORDS[airport];
+      if (coords) {
+        return {
+          adapter: new AdsbAdapter({ center: { lat: coords.lat, lon: coords.lon, radiusNm: radius } }),
+          label: `Tracking: ${airport} (${radius}nm)`,
+        };
+      }
+      // Unknown airport code — still try coordinates if user typed something
+      return {
+        adapter: new AdsbAdapter({ center: { lat: 40.6413, lon: -73.7781, radiusNm: radius } }),
+        label: `Unknown: ${airport}. Defaulting to KJFK (${radius}nm)`,
+      };
+    }
+
+    if (mode === 'type' && acType) {
+      return {
+        adapter: new AdsbAdapter({ aircraftType: acType }),
+        label: `Tracking type: ${acType}`,
+      };
+    }
+
+    // Default: JFK area
+    return {
+      adapter: new AdsbAdapter({ center: { lat: 40.6413, lon: -73.7781, radiusNm: 50 } }),
+      label: 'Tracking: KJFK area (default)',
+    };
+  }
+
   async function start() {
     try {
+      statusMessage = 'Starting audio engine...';
+
       orchestrator = new Orchestrator();
       await orchestrator.start();
+
+      // Forward status messages to UI
+      orchestrator.onStatus((msg) => { statusMessage = msg; });
 
       // Set mapping preset
       const preset = selectedPreset === 'ambient'
@@ -57,73 +121,58 @@
         : flightDronePreset();
       orchestrator.setMappings(preset);
 
-      // Create adapter based on tracking mode
-      let mode: string = '';
-      trackingMode.subscribe((v) => { mode = v; })();
+      // Build adapter from current config
+      const built = buildAdapter();
+      adapter = built.adapter;
+      statusMessage = built.label;
+      trackingLabel.set(built.label);
 
-      let callsign = '';
-      callsignInput.subscribe((v) => { callsign = v; })();
-
-      let airport = '';
-      airportInput.subscribe((v) => { airport = v; })();
-
-      let radius = 50;
-      airportRadius.subscribe((v) => { radius = v; })();
-
-      let acType = '';
-      typeInput.subscribe((v) => { acType = v; })();
-
-      if (mode === 'callsign' && callsign) {
-        const callsigns = callsign.split(',').map((s) => s.trim()).filter(Boolean);
-        adapter = new AdsbAdapter({ callsigns });
-        statusMessage = `Tracking: ${callsigns.join(', ')}`;
-      } else if (mode === 'airport' && airport) {
-        const coords = AIRPORT_COORDS[airport];
-        if (coords) {
-          adapter = new AdsbAdapter({
-            center: { lat: coords.lat, lon: coords.lon, radiusNm: radius },
-          });
-          statusMessage = `Tracking: ${airport} (${radius}nm)`;
-        } else {
-          statusMessage = `Unknown airport: ${airport}. Using KJFK.`;
-          adapter = new AdsbAdapter({
-            center: { lat: 40.6413, lon: -73.7781, radiusNm: radius },
-          });
+      // Wire up adapter status changes to UI
+      adapter.onStatusChange((info) => {
+        if (info.status === 'error') {
+          statusMessage = `Error: ${info.errorMessage}`;
+        } else if (info.status === 'connected') {
+          statusMessage = `${built.label} | ${info.entityCount} aircraft`;
         }
-      } else if (mode === 'type' && acType) {
-        adapter = new AdsbAdapter({ aircraftType: acType });
-        statusMessage = `Tracking type: ${acType}`;
-      } else {
-        // Default: JFK area
-        adapter = new AdsbAdapter({
-          center: { lat: 40.6413, lon: -73.7781, radiusNm: 50 },
-        });
-        statusMessage = 'Tracking: KJFK area (default)';
-      }
+      });
 
       orchestrator.addDataSource(adapter);
       await orchestrator.connectAll();
 
+      // Keep reference to data recorder for downloads after stop
+      lastDataRecorder = orchestrator.dataRecorder;
+
       isRunning.set(true);
 
-      // UI update loop
+      // UI update loop — sync voice data to store
       updateTimer = setInterval(() => {
         if (!orchestrator) return;
+
         const voices = orchestrator.synth.voiceIds.map((entityId) => {
           const voice = orchestrator!.synth.getVoice(entityId);
+          const meta = orchestrator!.getEntityMeta(entityId);
           return {
             entityId,
+            callsign: (meta?.callsign as string) || undefined,
             pitch: voice?.currentPitch || 0,
-            gain: 0.5,
+            gain: voice ? 0.6 : 0,
             pan: 0,
+            altitude: (meta?.altFeet as number) || 0,
+            velocity: (meta?.groundSpeed as number) || 0,
           };
         });
         activeVoices.set(voices);
+
+        // Update status with entity count
+        const info = adapter?.info;
+        if (info && info.status === 'connected') {
+          statusMessage = `${built.label} | ${info.entityCount} aircraft`;
+        }
       }, 500);
 
     } catch (err) {
       statusMessage = `Error: ${err instanceof Error ? err.message : 'Unknown error'}`;
-      console.error(err);
+      console.error('Start failed:', err);
     }
   }
 
@@ -132,6 +181,13 @@
       clearInterval(updateTimer);
       updateTimer = null;
     }
+
+    // Keep data recorder reference before disposing
+    if (orchestrator) {
+      lastDataRecorder = orchestrator.dataRecorder;
+      hasRecordedData.set(lastDataRecorder.frameCount > 0);
+    }
+
     orchestrator?.dispose();
     orchestrator = null;
     adapter = null;
@@ -140,12 +196,51 @@
     statusMessage = 'Stopped';
   }
 
+  /** Hot-swap tracking target without stopping the engine */
+  async function retrack() {
+    if (!orchestrator || !running) return;
+
+    // Disconnect old adapter
+    if (adapter) {
+      adapter.disconnect();
+    }
+
+    // Build new adapter from current config
+    const built = buildAdapter();
+    adapter = built.adapter;
+    statusMessage = built.label;
+    trackingLabel.set(built.label);
+
+    // Wire status
+    adapter.onStatusChange((info) => {
+      if (info.status === 'error') {
+        statusMessage = `Error: ${info.errorMessage}`;
+      } else if (info.status === 'connected') {
+        statusMessage = `${built.label} | ${info.entityCount} aircraft`;
+      }
+    });
+
+    orchestrator.addDataSource(adapter);
+    try {
+      await adapter.connect();
+    } catch (err) {
+      statusMessage = `Retrack error: ${err instanceof Error ? err.message : 'Unknown'}`;
+    }
+  }
+
+  // Watch for tracking config changes while running — auto-retrack
+  trackingLabel.subscribe((label) => {
+    if (running && label.startsWith('Queued:')) {
+      retrack();
+    }
+  });
+
   function toggleRecording() {
     if (!orchestrator) return;
     if (recording) {
       orchestrator.stopRecording();
       isRecording.set(false);
-      statusMessage = 'Recording stopped. Stems available for download.';
+      statusMessage = 'Stem recording stopped.';
     } else {
       orchestrator.startRecording();
       isRecording.set(true);
@@ -154,14 +249,23 @@
   }
 
   async function downloadStems() {
-    if (!orchestrator) return;
-    await orchestrator.stemRecorder.downloadAllStems();
+    if (orchestrator) {
+      await orchestrator.stemRecorder.downloadAllStems();
+    }
   }
 
   function downloadData() {
-    if (!orchestrator) return;
-    orchestrator.dataRecorder.downloadJSON();
+    // Use persisted recorder if orchestrator was stopped
+    const recorder = orchestrator?.dataRecorder || lastDataRecorder;
+    if (recorder && recorder.frameCount > 0) {
+      recorder.downloadJSON();
+    } else {
+      statusMessage = 'No data recorded yet.';
+    }
   }
+
+  let showRecordedData = $state(false);
+  hasRecordedData.subscribe((v) => { showRecordedData = v; });
 </script>
 
 <div class="app">
@@ -206,15 +310,16 @@
         {/if}
       </div>
 
-      {#if recording || orchestrator?.dataRecorder.frameCount}
-        <div class="export-buttons">
+      <div class="export-buttons">
+        {#if running && recording}
           <button onclick={downloadStems}>Download Stems</button>
-          <button onclick={downloadData}>Download Data</button>
-        </div>
-      {/if}
+        {/if}
+        <button onclick={downloadData}>Download Data</button>
+      </div>
     </div>
 
     <div class="main-panel">
+      <DataFeed />
       <VoiceMonitor />
     </div>
   </div>

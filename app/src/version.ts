@@ -6,5 +6,5 @@
 // 0.5.x  Eclipse    — Phase 5: All Sources
 // 1.0.x  Flare      — Phase 6: Polish & Release
 
-export const VERSION = '0.1.0';
+export const VERSION = '0.1.1';
 export const CODENAME = 'Whisper';

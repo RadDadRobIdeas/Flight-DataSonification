@@ -1,11 +1,14 @@
 <script lang="ts">
-  import { trackingMode, callsignInput, airportInput, airportRadius, typeInput } from '../stores';
+  import { trackingMode, callsignInput, airportInput, airportRadius, typeInput, trackingLabel } from '../stores';
 
   let callsignValue = $state('');
   let airportValue = $state('');
   let radiusValue = $state(50);
   let typeValue = $state('');
   let mode = $state<'callsign' | 'airport' | 'type'>('callsign');
+  let label = $state('');
+
+  trackingLabel.subscribe((v) => { label = v; });
 
   function updateMode(newMode: 'callsign' | 'airport' | 'type') {
     mode = newMode;
@@ -13,16 +16,25 @@
   }
 
   function updateCallsign() {
-    callsignInput.set(callsignValue.toUpperCase().trim());
+    const val = callsignValue.toUpperCase().trim();
+    if (!val) return;
+    callsignInput.set(val);
+    trackingLabel.set(`Queued: ${val}`);
   }
 
   function updateAirport() {
-    airportInput.set(airportValue.toUpperCase().trim());
+    const val = airportValue.toUpperCase().trim();
+    if (!val) return;
+    airportInput.set(val);
     airportRadius.set(radiusValue);
+    trackingLabel.set(`Queued: ${val} (${radiusValue}nm)`);
   }
 
   function updateType() {
-    typeInput.set(typeValue.toUpperCase().trim());
+    const val = typeValue.toUpperCase().trim();
+    if (!val) return;
+    typeInput.set(val);
+    trackingLabel.set(`Queued: type ${val}`);
   }
 </script>
 
@@ -76,6 +88,7 @@
           type="text"
           placeholder="e.g. KJFK, EGLL, KLAX"
           bind:value={airportValue}
+          onkeydown={(e) => e.key === 'Enter' && updateAirport()}
         />
         <button onclick={updateAirport}>Track</button>
       </div>
@@ -105,6 +118,10 @@
       </div>
       <p class="hint">Track all aircraft of this type worldwide</p>
     </div>
+  {/if}
+
+  {#if label}
+    <div class="tracking-label">{label}</div>
   {/if}
 </div>
 
@@ -199,5 +216,16 @@
     font-size: 0.7rem;
     color: #666;
     margin: 0;
+  }
+
+  .tracking-label {
+    margin-top: 0.5rem;
+    padding: 0.4rem 0.6rem;
+    background: #252525;
+    border: 1px solid #444;
+    border-radius: 4px;
+    font-size: 0.75rem;
+    color: #4a9eff;
+    font-family: monospace;
   }
 </style>

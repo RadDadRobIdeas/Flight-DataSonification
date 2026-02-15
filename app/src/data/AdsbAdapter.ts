@@ -32,12 +32,12 @@ interface AdsbAircraft {
 }
 
 interface AdsbResponse {
-  ac: AdsbAircraft[];
-  msg: string;
-  now: number;
-  total: number;
-  ctime: number;
-  ptime: number;
+  ac?: AdsbAircraft[];
+  msg?: string;
+  now?: number;
+  total?: number;
+  ctime?: number;
+  ptime?: number;
 }
 
 export type AdsbProvider = 'adsb.lol' | 'airplanes.live';
@@ -61,6 +61,7 @@ export class AdsbAdapter implements DataSourceAdapter {
   private pollTimer: ReturnType<typeof setInterval> | null = null;
   private dataCallbacks: Array<(packet: DataPacket) => void> = [];
   private removeCallbacks: Array<(sourceId: string) => void> = [];
+  private statusCallbacks: Array<(info: DataSourceInfo) => void> = [];
   private knownEntities: Set<string> = new Set();
   private _info: DataSourceInfo;
 
@@ -86,23 +87,23 @@ export class AdsbAdapter implements DataSourceAdapter {
   }
 
   async connect(): Promise<void> {
-    this._info.status = 'connecting';
+    this.updateStatus('connecting');
 
     try {
       // Initial fetch to verify connectivity
       await this.fetchAndEmit();
-      this._info.status = 'connected';
+      this.updateStatus('connected');
 
       // Start polling
       this.pollTimer = setInterval(() => {
         this.fetchAndEmit().catch((err) => {
-          this._info.status = 'error';
-          this._info.errorMessage = err.message;
+          this.updateStatus('error', err.message);
+          console.error('[ADS-B] Poll error:', err);
         });
       }, this.config.pollIntervalMs);
     } catch (err) {
-      this._info.status = 'error';
-      this._info.errorMessage = err instanceof Error ? err.message : 'Connection failed';
+      const msg = err instanceof Error ? err.message : 'Connection failed';
+      this.updateStatus('error', msg);
       throw err;
     }
   }
@@ -112,7 +113,7 @@ export class AdsbAdapter implements DataSourceAdapter {
       clearInterval(this.pollTimer);
       this.pollTimer = null;
     }
-    this._info.status = 'disconnected';
+    this.updateStatus('disconnected');
 
     // Notify removal of all entities
     for (const entityId of this.knownEntities) {
@@ -129,24 +130,49 @@ export class AdsbAdapter implements DataSourceAdapter {
     this.removeCallbacks.push(callback);
   }
 
-  /** Update tracking configuration without reconnecting */
+  onStatusChange(callback: (info: DataSourceInfo) => void): void {
+    this.statusCallbacks.push(callback);
+  }
+
+  /** Update tracking configuration — can be called while connected */
   updateConfig(config: Partial<AdsbAdapterConfig>): void {
     Object.assign(this.config, config);
   }
 
+  /** Force an immediate fetch (e.g. after config change) */
+  async refresh(): Promise<void> {
+    await this.fetchAndEmit();
+  }
+
+  private updateStatus(status: DataSourceInfo['status'], errorMessage?: string): void {
+    this._info.status = status;
+    this._info.errorMessage = errorMessage;
+    for (const cb of this.statusCallbacks) cb(this.info);
+  }
+
   private async fetchAndEmit(): Promise<void> {
     const url = this.buildUrl();
+    console.log('[ADS-B] Fetching:', url);
+
     const response = await fetch(url);
     if (!response.ok) {
-      throw new Error(`ADS-B API error: ${response.status} ${response.statusText}`);
+      throw new Error(`HTTP ${response.status} ${response.statusText} from ${url}`);
     }
 
     const data: AdsbResponse = await response.json();
     this._info.lastUpdate = Date.now();
 
+    // Handle missing or empty aircraft array
+    const aircraft = data.ac || [];
+    if (aircraft.length === 0) {
+      console.log('[ADS-B] Response has 0 aircraft. msg:', data.msg, 'total:', data.total);
+    } else {
+      console.log(`[ADS-B] Received ${aircraft.length} aircraft`);
+    }
+
     const currentEntities = new Set<string>();
 
-    for (const ac of data.ac) {
+    for (const ac of aircraft) {
       // Skip aircraft without position data
       if (ac.lat === undefined || ac.lon === undefined) continue;
 
@@ -176,6 +202,7 @@ export class AdsbAdapter implements DataSourceAdapter {
 
     this.knownEntities = currentEntities;
     this._info.entityCount = currentEntities.size;
+    this.updateStatus(this._info.status === 'error' ? 'connected' : this._info.status);
   }
 
   private buildUrl(): string {
@@ -250,6 +277,14 @@ export class AdsbAdapter implements DataSourceAdapter {
         },
       },
       events: [],
+      // Attach metadata for display
+      metadata: {
+        callsign: ac.flight?.trim() || '',
+        hex: ac.hex,
+        altFeet: altFeet,
+        groundSpeed: ac.gs || 0,
+        onGround,
+      },
     };
 
     // Add optional fields if available
@@ -279,7 +314,6 @@ export class AdsbAdapter implements DataSourceAdapter {
     }
 
     // Detect events
-    const wasOnGround = !this.knownEntities.has(ac.hex); // new entity
     if (onGround) {
       packet.events.push({
         type: 'on_ground',
@@ -287,7 +321,7 @@ export class AdsbAdapter implements DataSourceAdapter {
         metadata: { callsign: ac.flight?.trim() },
       });
     }
-    if (!wasOnGround && !this.knownEntities.has(ac.hex)) {
+    if (!this.knownEntities.has(ac.hex)) {
       packet.events.push({
         type: 'new_contact',
         severity: 0.3,

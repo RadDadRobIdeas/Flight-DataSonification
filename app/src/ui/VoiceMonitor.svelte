@@ -7,6 +7,8 @@
     pitch: number;
     gain: number;
     pan: number;
+    altitude?: number;
+    velocity?: number;
   }>>([]);
 
   activeVoices.subscribe((v) => { voices = v; });
@@ -17,6 +19,16 @@
   function formatHz(hz: number): string {
     if (hz >= 1000) return `${(hz / 1000).toFixed(1)}kHz`;
     return `${hz.toFixed(0)}Hz`;
+  }
+
+  function fmtAlt(ft: number): string {
+    if (!ft) return '—';
+    return ft.toLocaleString() + 'ft';
+  }
+
+  function fmtSpd(kts: number): string {
+    if (!kts) return '—';
+    return Math.round(kts) + 'kts';
   }
 
   function panLabel(pan: number): string {
@@ -33,6 +45,8 @@
     {#each voices as voice (voice.entityId)}
       <div class="voice-row">
         <span class="entity-id">{voice.callsign || voice.entityId}</span>
+        <span class="param alt">{fmtAlt(voice.altitude || 0)}</span>
+        <span class="param spd">{fmtSpd(voice.velocity || 0)}</span>
         <span class="param pitch">{formatHz(voice.pitch)}</span>
         <div class="meter-bar">
           <div class="meter-fill" style:width="{voice.gain * 100}%"></div>
@@ -102,6 +116,18 @@
     color: #888;
     width: 50px;
     text-align: right;
+  }
+
+  .alt {
+    color: #b39ddb;
+    width: 55px;
+    font-size: 0.65rem;
+  }
+
+  .spd {
+    color: #80cbc4;
+    width: 45px;
+    font-size: 0.65rem;
   }
 
   .pitch {

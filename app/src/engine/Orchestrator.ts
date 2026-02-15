@@ -7,6 +7,7 @@ import { SynthEngine } from './SynthEngine';
 import { StemRecorder } from './StemRecorder';
 import { MappingEngine } from '../mapping/MappingEngine';
 import { DataRecorder } from '../data/DataRecorder';
+import { pushDataFeed } from '../stores';
 
 export class Orchestrator {
   readonly synth: SynthEngine;
@@ -14,14 +15,22 @@ export class Orchestrator {
   readonly stemRecorder: StemRecorder;
   readonly dataRecorder: DataRecorder;
 
+  // Entity metadata cache (callsign, etc.) for UI display
+  private entityMeta: Map<string, Record<string, unknown>> = new Map();
+
   private dataSources: Map<string, DataSourceAdapter> = new Map();
   private started = false;
+
+  // Callbacks for external status monitoring
+  private statusCallbacks: Array<(msg: string) => void> = [];
 
   constructor() {
     this.synth = new SynthEngine();
     this.mapping = new MappingEngine();
     this.stemRecorder = new StemRecorder();
     this.dataRecorder = new DataRecorder();
+    // Always record data so downloads work without explicit record toggle
+    this.dataRecorder.startRecording();
   }
 
   /** Must be called from a user gesture to unlock Web Audio */
@@ -29,6 +38,14 @@ export class Orchestrator {
     if (this.started) return;
     await this.synth.start();
     this.started = true;
+  }
+
+  onStatus(callback: (msg: string) => void): void {
+    this.statusCallbacks.push(callback);
+  }
+
+  private emitStatus(msg: string): void {
+    for (const cb of this.statusCallbacks) cb(msg);
   }
 
   /** Register a data source adapter */
@@ -50,7 +67,9 @@ export class Orchestrator {
   async connectAll(): Promise<void> {
     const promises = Array.from(this.dataSources.values()).map((ds) =>
       ds.connect().catch((err) => {
-        console.error(`Failed to connect ${ds.info.name}:`, err);
+        const msg = `Failed to connect ${ds.info.name}: ${err.message}`;
+        console.error(msg);
+        this.emitStatus(msg);
       })
     );
     await Promise.all(promises);
@@ -73,9 +92,13 @@ export class Orchestrator {
     return Array.from(this.dataSources.values()).map((ds) => ds.info);
   }
 
-  /** Start recording data and stems */
+  /** Get cached metadata for an entity */
+  getEntityMeta(entityId: string): Record<string, unknown> | undefined {
+    return this.entityMeta.get(entityId);
+  }
+
+  /** Start recording stems (data is always recorded) */
   startRecording(): void {
-    this.dataRecorder.startRecording();
     // Add existing voice stems
     for (const stem of this.synth.getAllStemBuses()) {
       this.stemRecorder.addStem(stem.entityId, stem.output);
@@ -83,9 +106,8 @@ export class Orchestrator {
     this.stemRecorder.startAll();
   }
 
-  /** Stop recording */
+  /** Stop recording stems */
   stopRecording(): void {
-    this.dataRecorder.stopRecording();
     this.stemRecorder.stopAll();
   }
 
@@ -93,13 +115,21 @@ export class Orchestrator {
   dispose(): void {
     this.disconnectAll();
     this.stemRecorder.clear();
-    this.dataRecorder.clear();
+    // Don't clear data recorder — keep it for downloads after stop
     this.synth.dispose();
   }
 
   private handleData(packet: DataPacket): void {
     // Record raw data
     this.dataRecorder.recordPacket(packet);
+
+    // Push to live data feed for UI
+    pushDataFeed(packet);
+
+    // Cache metadata
+    if (packet.metadata) {
+      this.entityMeta.set(packet.sourceId, packet.metadata);
+    }
 
     // Map data to synth parameters
     const mapped = this.mapping.process(packet);
@@ -130,12 +160,16 @@ export class Orchestrator {
     this.synth.releaseVoice(entityId);
     this.mapping.clearEntity(entityId);
     this.stemRecorder.removeStem(entityId);
+    this.entityMeta.delete(entityId);
   }
 
-  private handleEvent(event: { type: string; severity: number }, _entityId: string): void {
-    // For now, log events. Phase 2 will add trigger voices.
+  private handleEvent(event: { type: string; severity: number }, entityId: string): void {
     if (event.type === 'emergency') {
-      console.warn(`[EVENT] Emergency detected for ${_entityId}`);
+      this.emitStatus(`EMERGENCY: ${entityId} squawking ${event.type}`);
+    } else if (event.type === 'new_contact') {
+      const meta = this.entityMeta.get(entityId);
+      const callsign = (meta?.callsign as string) || entityId;
+      console.log(`[NEW] ${callsign}`);
     }
   }
 }
