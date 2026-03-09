@@ -1,0 +1,17 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "DataSonification (dev)",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["--prefix", "app", "run", "dev"],
+      "port": 5173
+    },
+    {
+      "name": "DataSonification (preview build)",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["--prefix", "app", "run", "preview"],
+      "port": 4173
+    }
+  ]
+}
