@@ -8,7 +8,7 @@ This is the continuation of a project that was started with a previous AI agent.
 
 **Please start by doing the following:**
 
-1. Read `HANDOFF.md` at the project root — it contains the complete project context: vision, architecture, current state, known issues, user preferences, and next steps.
+1. Read `FDS_HANDOFF.md` at the project root — it contains the complete project context: vision, architecture, current state, known issues, user preferences, and next steps.
 2. Read the `README.md` for the project overview.
 3. Skim the repository structure and key files listed in the "Key Files to Read First" section of the handoff.
 4. Review the git log (`git log --oneline`) to understand the commit history and what's been done.
